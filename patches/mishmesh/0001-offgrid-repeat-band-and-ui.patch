@@ -1,0 +1,273 @@
+diff --git a/examples/companion_radio/MyMesh.cpp b/examples/companion_radio/MyMesh.cpp
+index 10ab2e44..7f34969f 100644
+--- a/examples/companion_radio/MyMesh.cpp
++++ b/examples/companion_radio/MyMesh.cpp
+@@ -1660,9 +1660,25 @@ struct FreqRange {
+   uint32_t lower_freq, upper_freq;
+ };
+ 
++// What off-grid repeat is *permitted* on. Consumed by isValidClientRepeatFreq()
++// for both the phone-app path (CMD_SET_RADIO_PARAMS) and the on-device path
++// (UITask setRadioConfig). Not what the picker renders -- see the presets below.
+ static FreqRange repeat_freq_ranges[] = {
+   #ifdef ALLOWED_REPEAT_FREQ_RANGE
+   ALLOWED_REPEAT_FREQ_RANGE
++  #elif defined(OFFGRID_ALLOW_US915_BAND)
++  // Whole US/Canada 902-928 MHz ISM band (FCC Part 15), rather than the single
++  // 918.000 point below. Lets a group enable off-grid repeat on whatever
++  // frequency they already use, so the rest of the mesh needs no reconfiguring
++  // -- the error-prone part when a team is already deployed.
++  //
++  // Deliberately still bounded by the band: the aim is to drop a restriction
++  // that has no regulatory basis, not to make out-of-band TX easy to select.
++  //
++  // NOTE: this cannot be expressed via the ALLOWED_REPEAT_FREQ_RANGE hook
++  // above, because SCons splits -D values on commas, so a {lower,upper} pair
++  // arrives as two separate defines and silently collapses to one bogus range.
++  { 902000, 928000 }
+   #else
+   { 433000, 433000 },
+   { 869495, 869495 },
+@@ -1677,13 +1693,26 @@ bool MyMesh::isValidClientRepeatFreq(uint32_t f) const {
+   }
+   return false;
+ }
++// One-tap shortcuts offered by the on-device picker (kHz). Kept separate from
++// repeat_freq_ranges because that table now describes what is *legal* -- a band,
++// not a set of points. Rendering a band as menu rows would collapse the picker
++// to a single entry at the band's lower edge, which is not a useful choice.
++// The #else list reproduces the upstream rows exactly.
++static const uint32_t repeat_freq_presets[] = {
++  #ifdef OFFGRID_ALLOW_US915_BAND
++  918000
++  #else
++  433000, 869495, 918000
++  #endif
++};
++
+ // [mishmesh] expose the board's allowed off-grid repeat frequencies (kHz) to the UI
+ int MyMesh::uiRepeatFreqCount() const {
+-  return (int)(sizeof(repeat_freq_ranges) / sizeof(repeat_freq_ranges[0]));
++  return (int)(sizeof(repeat_freq_presets) / sizeof(repeat_freq_presets[0]));
+ }
+ uint32_t MyMesh::uiRepeatFreqKhz(int i) const {
+   if (i < 0 || i >= uiRepeatFreqCount()) return 0;
+-  return repeat_freq_ranges[i].lower_freq;
++  return repeat_freq_presets[i];
+ }
+ // [/mishmesh]
+ 
+diff --git a/mishmesh/applets/RepeaterApplet.cpp b/mishmesh/applets/RepeaterApplet.cpp
+index 6aff34b3..9166752e 100644
+--- a/mishmesh/applets/RepeaterApplet.cpp
++++ b/mishmesh/applets/RepeaterApplet.cpp
+@@ -8,27 +8,43 @@ namespace mishmesh {
+ 
+ // Kept to two lines: it scrolls with the list as a header, so on a short (160x80)
+ // screen the options must still be visible below it at the top of the scroll.
++// No longer than the original, so the layout regressions below it still hold.
+ static const char* INFO =
+-  "Off-grid repeater. Leaves your normal mesh while on.";
++  "Off-grid repeat. Keep your frequency, or pick one.";
+ 
+ RepeaterApplet::RepeaterApplet() : Applet("Repeater") {}
+ 
++bool RepeaterApplet::matchesPreset(float mhz) const {
++  if (!_app) return false;
++  for (int k = 0; k < _app->repeatFreqCount(); k++) {
++    if (fabsf(_app->repeatFreqMhz(k) - mhz) < 0.001f) return true;
++  }
++  return false;
++}
++
+ int RepeaterApplet::count() const {
+-  return 1 + (_app ? _app->repeatFreqCount() : 0);   // Off + allowed frequencies
++  return ROW_PRESET0 + (_app ? _app->repeatFreqCount() : 0);   // Off + current + presets
+ }
+ 
+ const char* RepeaterApplet::label(int i) const {
+-  if (i == 0) return "Off";
+-  snprintf(_lbl, sizeof(_lbl), "%.3f MHz", _app ? _app->repeatFreqMhz(i - 1) : 0.0f);
++  if (i == ROW_OFF) return "Off";
++  if (i == ROW_CURRENT) {   // repeat without retuning: show what it would run on
++    snprintf(_lbl, sizeof(_lbl), "On %.3f MHz", _tgt ? _tgt->stagedConfig().freqMhz : 0.0f);
++    return _lbl;
++  }
++  snprintf(_lbl, sizeof(_lbl), "%.3f MHz", _app ? _app->repeatFreqMhz(i - ROW_PRESET0) : 0.0f);
+   return _lbl;
+ }
+ 
+ bool RepeaterApplet::radioOn(int i) const {
+-  if (!_tgt) return i == 0;
++  if (!_tgt) return i == ROW_OFF;
+   const RadioConfig& c = _tgt->stagedConfig();
+-  if (i == 0) return !c.repeater;
++  if (i == ROW_OFF) return !c.repeater;
+   if (!c.repeater || !_app) return false;
+-  return fabsf(_app->repeatFreqMhz(i - 1) - c.freqMhz) < 0.001f;
++  // A preset frequency marks its own row, so "current" only claims the mark when
++  // repeating somewhere that is not a preset -- exactly one row is ever marked.
++  if (i == ROW_CURRENT) return !matchesPreset(c.freqMhz);
++  return fabsf(_app->repeatFreqMhz(i - ROW_PRESET0) - c.freqMhz) < 0.001f;
+ }
+ 
+ void RepeaterApplet::onStart(AppletContext& ctx) {
+@@ -67,12 +83,19 @@ bool RepeaterApplet::onInput(InputEvent ev) {
+   if (ev == InputEvent::Select && _tgt) {
+     int i = _list.selected();
+     const RadioConfig& c = _tgt->stagedConfig();
+-    if (i == 0) {                                   // Off -> restore + disable
++    if (i == ROW_OFF) {                             // Off -> restore + disable
+       if (!c.repeater) return true;                 // already off: no-op (avoid a needless apply)
+       if (_app) { float s = _app->savedRepeatFreq(); if (s > 0.0f) _tgt->stageFrequency(s); }
+       _tgt->stageRepeater(false);
++    } else if (i == ROW_CURRENT) {                  // enable, leaving the radio where it is
++      if (c.repeater) return true;                  // already repeating: no-op
++      if (_app) _app->setSavedRepeatFreq(c.freqMhz);   // restore target is the same freq
++      _tgt->stageRepeater(true);                    // deliberately no stageFrequency(): the
++                                                    // whole point is that the mesh keeps its
++                                                    // existing freq/bw/sf/cr, so nobody else
++                                                    // has to reconfigure anything
+     } else {                                        // enable on a chosen frequency
+-      float f = _app ? _app->repeatFreqMhz(i - 1) : 0.0f;
++      float f = _app ? _app->repeatFreqMhz(i - ROW_PRESET0) : 0.0f;
+       if (c.repeater && fabsf(c.freqMhz - f) < 0.001f) return true;   // already on this freq: no-op
+       if (!c.repeater && _app) _app->setSavedRepeatFreq(c.freqMhz);   // remember pre-repeat freq
+       if (_app) _tgt->stageFrequency(f);
+diff --git a/mishmesh/applets/RepeaterApplet.h b/mishmesh/applets/RepeaterApplet.h
+index 35f14475..964c474a 100644
+--- a/mishmesh/applets/RepeaterApplet.h
++++ b/mishmesh/applets/RepeaterApplet.h
+@@ -10,10 +10,17 @@ namespace mishmesh {
+ class Canvas;
+ 
+ // Manual off-grid repeater picker: a short description plus a pick-one list of
+-// Off + the firmware-permitted repeat frequencies. Stages the choice into the
+-// Radio panel (applied on its onHide). Launch-only singleton.
++// Off + the current frequency + the preset repeat frequencies. Stages the choice
++// into the Radio panel (applied on its onHide). Launch-only singleton.
+ class RepeaterApplet : public Applet, public ListModel {
+ public:
++  // Row layout. "Current" enables repeat without retuning, so a group can turn a
++  // companion into a repeater without moving the rest of the mesh off its
++  // frequency; the presets remain as one-tap shortcuts.
++  static const int ROW_OFF     = 0;
++  static const int ROW_CURRENT = 1;
++  static const int ROW_PRESET0 = 2;   // presets occupy ROW_PRESET0 .. count()-1
++
+   RepeaterApplet();
+   void configure(RadioStagingTarget* tgt) { _tgt = tgt; }
+ 
+@@ -21,7 +28,7 @@ public:
+   int  onRender(Canvas& c) override;
+   bool onInput(InputEvent ev) override;
+ 
+-  // ListModel: row 0 = Off, rows 1..N = allowed frequencies.
++  // ListModel: see the ROW_* constants above.
+   int count() const override;
+   const char* label(int i) const override;
+   bool isRadio(int) const override { return true; }
+@@ -42,9 +49,13 @@ private:
+     void draw(Canvas& c, int x, int y, int w, int h) override;
+   };
+ 
++  // True when mhz is one of the preset shortcuts, so the "current" row and a
++  // preset row never both show the selection mark.
++  bool matchesPreset(float mhz) const;
++
+   RadioStagingTarget* _tgt = nullptr;
+   AppServices* _app = nullptr;
+-  mutable char _lbl[16];
++  mutable char _lbl[24];   // fits "On 1000.000 MHz"; 16 was exact-fit at best
+   ListMenu   _list;
+   StatusBar  _bar;
+   InfoHeader _info;
+diff --git a/test/test_mishmesh_repeaterapplet/test_repeaterapplet.cpp b/test/test_mishmesh_repeaterapplet/test_repeaterapplet.cpp
+index 30508a51..18fa16ca 100644
+--- a/test/test_mishmesh_repeaterapplet/test_repeaterapplet.cpp
++++ b/test/test_mishmesh_repeaterapplet/test_repeaterapplet.cpp
+@@ -39,14 +39,51 @@ AppletContext ctxWith(AppServices* a, RadioStagingTarget* t) {
+ }
+ }  // namespace
+ 
+-TEST(RepeaterApplet, ListHasOffPlusAllowedFreqs) {
++TEST(RepeaterApplet, ListHasOffPlusCurrentPlusAllowedFreqs) {
+   FakeApp app; FakeTgt tgt;
+   AppletContext ctx = ctxWith(&app, &tgt);
+   RepeaterApplet& a = repeaterApplet();
+   a.onStart(ctx);
+-  EXPECT_EQ(4, a.count());              // Off + 3 frequencies
+-  EXPECT_STREQ("Off", a.label(0));
+-  EXPECT_TRUE(a.radioOn(0));            // repeat off -> Off selected
++  EXPECT_EQ(5, a.count());              // Off + current + 3 frequencies
++  EXPECT_STREQ("Off", a.label(RepeaterApplet::ROW_OFF));
++  EXPECT_TRUE(a.radioOn(RepeaterApplet::ROW_OFF));   // repeat off -> Off selected
++}
++
++// The "current" row names the frequency it would repeat on, so the choice is not
++// a blind one.
++TEST(RepeaterApplet, CurrentRowLabelShowsStagedFrequency) {
++  FakeApp app; FakeTgt tgt;             // staged 915.8
++  AppletContext ctx = ctxWith(&app, &tgt);
++  RepeaterApplet& a = repeaterApplet();
++  a.onStart(ctx);
++  EXPECT_STREQ("On 915.800 MHz", a.label(RepeaterApplet::ROW_CURRENT));
++}
++
++// The point of the fork: enabling repeat must not retune the radio, so the rest
++// of the mesh does not have to be reconfigured to follow it.
++TEST(RepeaterApplet, SelectCurrentEnablesWithoutRetuning) {
++  FakeApp app; FakeTgt tgt;             // start 915.8, repeat off
++  AppletContext ctx = ctxWith(&app, &tgt);
++  RepeaterApplet& a = repeaterApplet();
++  a.onStart(ctx);
++  a.selectRowForTest(RepeaterApplet::ROW_CURRENT);
++  EXPECT_TRUE(a.onInput(InputEvent::Select));
++  EXPECT_TRUE(tgt.cfg.repeater);
++  EXPECT_FLOAT_EQ(915.8f, tgt.cfg.freqMhz);   // unchanged
++  EXPECT_FLOAT_EQ(915.8f, app.saved);         // restore target is the same freq
++  EXPECT_TRUE(a.radioOn(RepeaterApplet::ROW_CURRENT));
++}
++
++// Exactly one row carries the mark: repeating on a preset marks the preset row,
++// not the "current" row, even though the current frequency is also that value.
++TEST(RepeaterApplet, PresetFrequencyMarksPresetRowNotCurrent) {
++  FakeApp app; FakeTgt tgt;
++  tgt.cfg = {918.0f, 250.0f, 10, 5, 20, true};   // repeating on a preset
++  AppletContext ctx = ctxWith(&app, &tgt);
++  RepeaterApplet& a = repeaterApplet();
++  a.onStart(ctx);
++  EXPECT_FALSE(a.radioOn(RepeaterApplet::ROW_CURRENT));
++  EXPECT_TRUE(a.radioOn(RepeaterApplet::ROW_PRESET0 + 2));   // 918.0
+ }
+ 
+ TEST(RepeaterApplet, SelectFrequencyEnablesAndRemembers) {
+@@ -54,12 +91,12 @@ TEST(RepeaterApplet, SelectFrequencyEnablesAndRemembers) {
+   AppletContext ctx = ctxWith(&app, &tgt);
+   RepeaterApplet& a = repeaterApplet();
+   a.onStart(ctx);
+-  a.selectRowForTest(3);               // row 3 = 918.0
++  a.selectRowForTest(RepeaterApplet::ROW_PRESET0 + 2);   // 918.0
+   EXPECT_TRUE(a.onInput(InputEvent::Select));
+   EXPECT_TRUE(tgt.cfg.repeater);
+   EXPECT_FLOAT_EQ(918.0f, tgt.cfg.freqMhz);
+   EXPECT_FLOAT_EQ(915.8f, app.saved);  // pre-repeat freq remembered
+-  EXPECT_TRUE(a.radioOn(3));
++  EXPECT_TRUE(a.radioOn(RepeaterApplet::ROW_PRESET0 + 2));
+ }
+ 
+ TEST(RepeaterApplet, SelectOffRestoresSavedFreq) {
+@@ -69,11 +106,11 @@ TEST(RepeaterApplet, SelectOffRestoresSavedFreq) {
+   AppletContext ctx = ctxWith(&app, &tgt);
+   RepeaterApplet& a = repeaterApplet();
+   a.onStart(ctx);
+-  a.selectRowForTest(0);               // Off
++  a.selectRowForTest(RepeaterApplet::ROW_OFF);
+   EXPECT_TRUE(a.onInput(InputEvent::Select));
+   EXPECT_FALSE(tgt.cfg.repeater);
+   EXPECT_FLOAT_EQ(915.8f, tgt.cfg.freqMhz);
+-  EXPECT_TRUE(a.radioOn(0));
++  EXPECT_TRUE(a.radioOn(RepeaterApplet::ROW_OFF));
+ }
+ 
+ // Regression: the status bar must reflect the live battery level. The applet used
