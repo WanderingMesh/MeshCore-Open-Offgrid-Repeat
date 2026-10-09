@@ -81,7 +81,7 @@ In [`firmware/`](firmware/). Each board has a `.uf2` (bootloader drag-and-drop) 
 | --- | --- | --- |
 | RAK4631 | `RAK_4631_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598` | 494112 / 712704 (69.3%) |
 | RAK3401 + RAK13302 (WisMesh 1W) | `RAK_3401_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598` | 431824 / 712704 (60.6%) |
-| Wio Tracker L1 (MishMesh) | `WioTrackerL1_companion_radio_ble_offgrid_mishmesh_mm-v1.5.0-offgrid_mc-v1.17.1-ff6b8bdc` | — |
+| Wio Tracker L1 (MishMesh) | `WioTrackerL1_companion_radio_ble_offgrid_mishmesh_mm-v1.5.0-offgrid2_mc-v1.17.1-ff6b8bdc` | 666676 / 708608 (94.1%) |
 
 SHA-256:
 
@@ -90,8 +90,8 @@ e8829aa9c180b8c91a6775f963ad21fc1177df0cf34a380ec064caea7ae0eb1d  RAK_3401_compa
 16d8271fe70b925aa30588141928b25c3e431cac236d47b564674a1c02f8ddb5  RAK_3401_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598-e9412598.zip
 2e933c4e4933337eafcc2e79dd8d8710c35b986644a274c5757366eb5e34684b  RAK_4631_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598-e9412598.uf2
 ea58cb1f514a11d25e3bbb34227285520256932491b4a24611f248d107380fd0  RAK_4631_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598-e9412598.zip
-3e0d455f3acd91296f9b8149581b6930d816b446d79af0a6979914b20fc63399  WioTrackerL1_companion_radio_ble_offgrid_mishmesh_mm-v1.5.0-offgrid_mc-v1.17.1-ff6b8bdc.uf2
-93b93612b04f02c125084758cc78eec486eca00b1f354609b39326d25a1c4441  WioTrackerL1_companion_radio_ble_offgrid_mishmesh_mm-v1.5.0-offgrid_mc-v1.17.1-ff6b8bdc.zip
+53621aab076983ca380ef8c61fdf5620d82b5ed9378bd8c2a11b02806ba64ab6  WioTrackerL1_companion_radio_ble_offgrid_mishmesh_mm-v1.5.0-offgrid2_mc-v1.17.1-ff6b8bdc.uf2
+89ee9b157e379d6bfa3a9f14a0f84eb6e95fdae9fd3cfe4edca4a1ce9b6fc154  WioTrackerL1_companion_radio_ble_offgrid_mishmesh_mm-v1.5.0-offgrid2_mc-v1.17.1-ff6b8bdc.zip
 ```
 
 All three are nRF52840 (UF2 family `0xADA52840`). The RAK boards start at `0x26000`
@@ -167,6 +167,50 @@ MishMesh has an on-device UI, which needs two extra things:
   retuning the radio. That is the whole point: the mesh keeps its existing
   freq/bw/sf/cr and nobody else reconfigures anything.
 
+### MishMesh radio-settings revert fix (`offgrid2`)
+
+The first Wio build (`mm-v1.5.0-offgrid`) inherited an upstream MishMesh bug that
+made radio changes made *from the phone app* appear to revert, or get stuck on a
+previous frequency. `offgrid2` fixes it. Symptoms were:
+
+- Setting a frequency in the app, having it snap back to the previous value.
+- The same behaviour whether off-grid repeat was on or off.
+- A reboot letting the change stick, then the *new* value becoming the one it
+  reverted to.
+
+`RadioSettingsPanel` is a singleton that stays on the applet stack while the
+screen sleeps, and `AppletHost` pops it on wake (`popToRoot` -> `onStop` ->
+`onHide`). Its `onHide` committed the **entire** staged `RadioConfig` that had
+been captured when the panel was opened, so a config changed over the companion
+link in the meantime was silently overwritten — frequency, bandwidth, SF, CR and
+TX power alike. `onFreqDone` also set the dirty flag unconditionally, so merely
+opening the frequency keypad and confirming was enough to arm that overwrite.
+
+The fix is three-part:
+
+- Field-level dirty tracking. `onHide` now re-reads the live config and overlays
+  **only the fields the user actually edited**, so an untouched field can never be
+  clobbered.
+- `stage*()` setters no-op when the value is unchanged, so confirming a keypad
+  without editing leaves the panel clean.
+- A new `onShow()` re-seeds the staged copy from live config, but only when
+  nothing is pending, so returning from a sub-screen preserves an in-progress edit
+  while a freshly revealed panel picks up external changes.
+
+While fixing that, `repeat_saved_freq` handling moved out of `RepeaterApplet`
+entirely. The picker only ever sees *staged* values, so writing that pref inline
+could record a restore target the radio was never tuned to — and it wrote to flash
+even if the user then backed out. `RadioSettingsPanel::onHide` now derives it from
+the committed before/after state, and a deliberate retune clears it so the
+Repeater menu's "Off" row cannot snap the radio back to a stale frequency.
+
+Covered by 7 new tests in `test/test_mishmesh_radio/` and
+`test/test_mishmesh_repeaterapplet/`; the suite is 964 tests and all pass.
+
+Note that the first two parts fix **upstream MishMesh behaviour**, not the off-grid
+change. Any MishMesh user who edits radio settings from the phone app while the
+device screen is awake is exposed to the original bug.
+
 ## Building from source
 
 Requires PlatformIO. Patches are verified to apply cleanly to the exact upstream commits
@@ -202,7 +246,7 @@ git checkout ff6b8bdc5928652bb70d6fef4dc4a4e8b7e072ce   # mishmesh-v1.5.0
 git apply /path/to/patches/mishmesh/0001-offgrid-repeat-band-and-ui.patch
 cp /path/to/patches/mishmesh/platformio.local.ini .
 
-export MISHMESH_VERSION=v1.5.0-offgrid
+export MISHMESH_VERSION=v1.5.0-offgrid2
 export FIRMWARE_VERSION=v1.17.1
 sh build.sh build-firmware WioTrackerL1_companion_radio_ble_offgrid_mishmesh
 ```
@@ -211,8 +255,8 @@ sh build.sh build-firmware WioTrackerL1_companion_radio_ble_offgrid_mishmesh
 > like `..._mishmesh_offgrid` falls through to the generic MeshCore path, which demands
 > `FIRMWARE_VERSION` and skips the `-DMISHMESH_VERSION` the About screen reads.
 
-Run the unit tests with `pio test -e native` (957 tests, including new coverage for the
-`On <freq>` row).
+Run the unit tests with `pio test -e native` (964 tests, including coverage for the
+`On <freq>` row and the radio-settings revert fix).
 
 ## Verifying a build
 

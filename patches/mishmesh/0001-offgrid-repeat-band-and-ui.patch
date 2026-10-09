@@ -58,7 +58,7 @@ index 10ab2e44..7f34969f 100644
  // [/mishmesh]
  
 diff --git a/mishmesh/applets/RepeaterApplet.cpp b/mishmesh/applets/RepeaterApplet.cpp
-index 6aff34b3..9166752e 100644
+index 6aff34b3..034b7d4b 100644
 --- a/mishmesh/applets/RepeaterApplet.cpp
 +++ b/mishmesh/applets/RepeaterApplet.cpp
 @@ -8,27 +8,43 @@ namespace mishmesh {
@@ -112,18 +112,21 @@ index 6aff34b3..9166752e 100644
  }
  
  void RepeaterApplet::onStart(AppletContext& ctx) {
-@@ -67,12 +83,19 @@ bool RepeaterApplet::onInput(InputEvent ev) {
+@@ -67,14 +83,23 @@ bool RepeaterApplet::onInput(InputEvent ev) {
    if (ev == InputEvent::Select && _tgt) {
      int i = _list.selected();
      const RadioConfig& c = _tgt->stagedConfig();
 -    if (i == 0) {                                   // Off -> restore + disable
++    // Nothing here persists anything: every row only stages. The Radio panel
++    // derives repeat_saved_freq from the committed before/after state in its
++    // onHide, so a choice that is backed out of never reaches flash -- and the
++    // remembered restore frequency is always one the radio was really tuned to.
 +    if (i == ROW_OFF) {                             // Off -> restore + disable
        if (!c.repeater) return true;                 // already off: no-op (avoid a needless apply)
        if (_app) { float s = _app->savedRepeatFreq(); if (s > 0.0f) _tgt->stageFrequency(s); }
        _tgt->stageRepeater(false);
 +    } else if (i == ROW_CURRENT) {                  // enable, leaving the radio where it is
 +      if (c.repeater) return true;                  // already repeating: no-op
-+      if (_app) _app->setSavedRepeatFreq(c.freqMhz);   // restore target is the same freq
 +      _tgt->stageRepeater(true);                    // deliberately no stageFrequency(): the
 +                                                    // whole point is that the mesh keeps its
 +                                                    // existing freq/bw/sf/cr, so nobody else
@@ -132,8 +135,10 @@ index 6aff34b3..9166752e 100644
 -      float f = _app ? _app->repeatFreqMhz(i - 1) : 0.0f;
 +      float f = _app ? _app->repeatFreqMhz(i - ROW_PRESET0) : 0.0f;
        if (c.repeater && fabsf(c.freqMhz - f) < 0.001f) return true;   // already on this freq: no-op
-       if (!c.repeater && _app) _app->setSavedRepeatFreq(c.freqMhz);   // remember pre-repeat freq
+-      if (!c.repeater && _app) _app->setSavedRepeatFreq(c.freqMhz);   // remember pre-repeat freq
        if (_app) _tgt->stageFrequency(f);
+       _tgt->stageRepeater(true);
+     }
 diff --git a/mishmesh/applets/RepeaterApplet.h b/mishmesh/applets/RepeaterApplet.h
 index 35f14475..964c474a 100644
 --- a/mishmesh/applets/RepeaterApplet.h
@@ -182,11 +187,286 @@ index 35f14475..964c474a 100644
    ListMenu   _list;
    StatusBar  _bar;
    InfoHeader _info;
+diff --git a/mishmesh/applets/settings/RadioSettingsPanel.cpp b/mishmesh/applets/settings/RadioSettingsPanel.cpp
+index 5571026b..74435f4b 100644
+--- a/mishmesh/applets/settings/RadioSettingsPanel.cpp
++++ b/mishmesh/applets/settings/RadioSettingsPanel.cpp
+@@ -45,15 +45,57 @@ void RadioSettingsPanel::begin(AppletContext& ctx) {
+   if (!_app || !_app->radioConfig(_staged)) {
+     _staged = {915.0f, 250.0f, 10, 5, 20, false};   // fallback when the seam is unavailable
+   }
+-  _dirty = false;
++  _dirtyMask = 0;
+   _model.cfg = &_staged;
+   _list.setRowHeight(14);
+   _list.setModel(&_model);
+   _list.resetSelection();
+ }
+ 
++// Revealed again - either the host brought the panel forward, or a sub-applet
++// (keypad, preset picker, Repeater) was popped off the top of it. Re-seed from
++// live only when nothing is pending, so an external change is picked up without
++// throwing away an edit the user is part-way through making.
++void RadioSettingsPanel::onShow() {
++  if (_dirtyMask == 0 && _app) _app->radioConfig(_staged);
++}
++
+ void RadioSettingsPanel::onHide() {
+-  if (_dirty && _app) { _app->setRadioConfig(_staged); _dirty = false; }
++  if (_dirtyMask == 0 || !_app) return;
++
++  // Commit onto the *current* live config rather than the copy staged on entry.
++  // See the class comment: by the time this runs the phone app may have retuned
++  // the radio, and only the fields the user actually touched may be written back.
++  RadioConfig live;
++  bool haveLive = _app->radioConfig(live);
++  RadioConfig out = haveLive ? live : _staged;
++  if (_dirtyMask & D_FREQ) out.freqMhz    = _staged.freqMhz;
++  if (_dirtyMask & D_BW)   out.bwKhz      = _staged.bwKhz;
++  if (_dirtyMask & D_SF)   out.sf         = _staged.sf;
++  if (_dirtyMask & D_CR)   out.cr         = _staged.cr;
++  if (_dirtyMask & D_TX)   out.txPowerDbm = _staged.txPowerDbm;
++  if (_dirtyMask & D_RPT)  out.repeater   = _staged.repeater;
++
++  _app->setRadioConfig(out);
++
++  // repeat_saved_freq is what the Repeater menu's "Off" row restores. Derive it
++  // here, at commit, instead of letting the picker write it inline: the picker
++  // only ever sees staged values, so an uncommitted edit could otherwise be
++  // recorded as a restore target the radio was never actually tuned to.
++  if (haveLive) {
++    float want;
++    if (out.repeater && !live.repeater) {
++      want = live.freqMhz;            // turning repeat on: remember where we were
++    } else if (!out.repeater || (_dirtyMask & D_FREQ)) {
++      want = 0.0f;                    // restored, or deliberately retuned -> retire it
++    } else {
++      want = _app->savedRepeatFreq(); // still repeating, frequency untouched
++    }
++    if (want != _app->savedRepeatFreq()) _app->setSavedRepeatFreq(want);  // avoid a needless flash write
++  }
++
++  _staged = out;        // keep showing what was actually written
++  _dirtyMask = 0;
+ }
+ 
+ int RadioSettingsPanel::renderBody(Canvas& c, int x, int y, int w, int h) {
+@@ -61,25 +103,45 @@ int RadioSettingsPanel::renderBody(Canvas& c, int x, int y, int w, int h) {
+   return _list.needsAnimation() ? ListMenu::TICK_MS : 1000;
+ }
+ 
++// Each setter marks only its own field, and only when the value really moves:
++// confirming the keypad on an unchanged number must not arm a commit, or simply
++// opening and closing the frequency editor would be enough to write the whole
++// panel back over someone else's change.
+ void RadioSettingsPanel::stageFrequency(float mhz) {
+   if (mhz < 150.0f) mhz = 150.0f; else if (mhz > 2500.0f) mhz = 2500.0f;
+-  _staged.freqMhz = mhz; _dirty = true;
++  if (mhz == _staged.freqMhz) return;
++  _staged.freqMhz = mhz; _dirtyMask |= D_FREQ;
++}
++void RadioSettingsPanel::stageBandwidth(float khz) {
++  if (khz == _staged.bwKhz) return;
++  _staged.bwKhz = khz; _dirtyMask |= D_BW;
++}
++void RadioSettingsPanel::stageSf(uint8_t sf) {
++  if (sf == _staged.sf) return;
++  _staged.sf = sf; _dirtyMask |= D_SF;
++}
++void RadioSettingsPanel::stageCr(uint8_t cr) {
++  if (cr == _staged.cr) return;
++  _staged.cr = cr; _dirtyMask |= D_CR;
+ }
+-void RadioSettingsPanel::stageBandwidth(float khz) { _staged.bwKhz = khz; _dirty = true; }
+-void RadioSettingsPanel::stageSf(uint8_t sf) { _staged.sf = sf; _dirty = true; }
+-void RadioSettingsPanel::stageCr(uint8_t cr) { _staged.cr = cr; _dirty = true; }
+ void RadioSettingsPanel::stageTxPower(int dbm) {
+   int8_t hi = _app ? _app->txPowerMax() : 22;
+   if (dbm < -9) dbm = -9; else if (dbm > hi) dbm = hi;
+-  _staged.txPowerDbm = (int8_t)dbm; _dirty = true;
++  if ((int8_t)dbm == _staged.txPowerDbm) return;
++  _staged.txPowerDbm = (int8_t)dbm; _dirtyMask |= D_TX;
++}
++void RadioSettingsPanel::stageRepeater(bool on) {
++  if (on == _staged.repeater) return;
++  _staged.repeater = on; _dirtyMask |= D_RPT;
+ }
+-void RadioSettingsPanel::stageRepeater(bool on) { _staged.repeater = on; _dirty = true; }
+ 
+ void RadioSettingsPanel::stagePreset(int idx) {
+   if (idx < 0 || idx >= PRESET_COUNT) return;
+   const RadioPreset& p = PRESETS[idx];
+-  _staged.freqMhz = p.freq; _staged.bwKhz = p.bw; _staged.sf = p.sf; _staged.cr = p.cr;
+-  _dirty = true;   // TX power intentionally left untouched
++  stageFrequency(p.freq);          // reuse the setters so each field is marked
++  stageBandwidth(p.bw);            // individually, and an already-matching preset
++  stageSf(p.sf);                   // stays clean
++  stageCr(p.cr);                   // TX power intentionally left untouched
+ }
+ 
+ void RadioSettingsPanel::onFreqDone(void* ctx, const char* text) {
+diff --git a/mishmesh/applets/settings/RadioSettingsPanel.h b/mishmesh/applets/settings/RadioSettingsPanel.h
+index c1eb3e45..82662633 100644
+--- a/mishmesh/applets/settings/RadioSettingsPanel.h
++++ b/mishmesh/applets/settings/RadioSettingsPanel.h
+@@ -8,10 +8,18 @@ namespace mishmesh {
+ 
+ // Radio settings: preset picker + frequency/bandwidth/SF/CR/TX power. Edits a
+ // staged RadioConfig loaded on begin(); applies once via AppServices on onHide().
++//
++// The commit is field-scoped on purpose. This panel is a singleton that stays on
++// the applet stack while the screen sleeps, and AppletHost pops it on wake
++// (popToRoot -> onStop -> onHide), so it can be committed many minutes after it
++// was opened. Writing the whole staged struct at that point silently reverts
++// anything the phone app changed in the meantime, which looks to the user like
++// the radio refusing to keep a new frequency.
+ class RadioSettingsPanel : public SettingsPanel, public RadioStagingTarget {
+ public:
+   const char* title() const override { return "Radio"; }
+   void begin(AppletContext& ctx) override;
++  void onShow() override;
+   void onHide() override;
+   int  renderBody(Canvas& c, int x, int y, int w, int h) override;
+   bool onInput(InputEvent ev) override;
+@@ -29,8 +37,20 @@ public:
+   // test seams
+   int rowCountForTest() const { return _model.count(); }
+   const char* rowValueForTest(int i) const { return _model.value(i); }
++  uint8_t dirtyMaskForTest() const { return _dirtyMask; }
+ 
+ private:
++  // One bit per editable field, set only when a stage*() call actually changes
++  // the value. onHide() overlays just these onto a freshly read live config.
++  enum DirtyBit : uint8_t {
++    D_FREQ = 1 << 0,
++    D_BW   = 1 << 1,
++    D_SF   = 1 << 2,
++    D_CR   = 1 << 3,
++    D_TX   = 1 << 4,
++    D_RPT  = 1 << 5,
++  };
++
+   struct Model : ListModel {
+     const RadioConfig* cfg = nullptr;
+     mutable char vbuf[24];
+@@ -47,7 +67,7 @@ private:
+   void editTxPower();
+ 
+   RadioConfig  _staged{915.0f, 250.0f, 10, 5, 20, false};
+-  bool         _dirty = false;
++  uint8_t      _dirtyMask = 0;
+   AppServices* _app = nullptr;
+   AppletHost*  _host = nullptr;
+   char         _scratch[16] = {0};
+diff --git a/test/test_mishmesh_radio/test_radio.cpp b/test/test_mishmesh_radio/test_radio.cpp
+index 73d1e0b4..ecc040b0 100644
+--- a/test/test_mishmesh_radio/test_radio.cpp
++++ b/test/test_mishmesh_radio/test_radio.cpp
+@@ -336,6 +336,99 @@ TEST(RepeaterRadio, LoadingPhaseBeforeFetchComplete) {
+   EXPECT_EQ(afterStart, svc.lastCli);   // no new CLI command sent
+ }
+ 
++// --- Stale-panel clobber -----------------------------------------------------
++// The panel is a singleton that stays on the applet stack while the screen
++// sleeps, and AppletHost pops it on wake (popToRoot -> onStop -> onHide). If it
++// commits its whole staged struct, a config changed meanwhile over the companion
++// link -- i.e. from the phone app -- is silently overwritten. Only fields the
++// user actually touched may be written back.
++
++TEST(RadioPanel, OnHideDoesNotClobberFieldsChangedElsewhere) {
++  FakeRadioApp app;
++  app.cfg = {915.8f, 250.0f, 10, 5, 20, false};
++  mishmesh::RadioSettingsPanel& panel = mishmesh::radioSettings();
++  auto ctx = ctxWith(&app);
++  panel.begin(ctx);                 // stages 915.8
++
++  panel.stageSf(9);                 // user edits SF only -> panel is dirty
++
++  app.cfg.freqMhz = 911.0f;         // phone app retunes while the panel sits stacked
++
++  panel.onHide();                   // wake-triggered pop commits the panel
++  EXPECT_FLOAT_EQ(911.0f, app.cfg.freqMhz);   // app's change must survive
++  EXPECT_EQ(9, app.cfg.sf);                   // the edit the user made still lands
++}
++
++TEST(RadioPanel, ConfirmingKeypadWithoutChangingDoesNotDirty) {
++  FakeRadioApp app;
++  app.cfg = {915.8f, 250.0f, 10, 5, 20, false};
++  mishmesh::RadioSettingsPanel& panel = mishmesh::radioSettings();
++  auto ctx = ctxWith(&app);
++  panel.begin(ctx);
++  panel.stageFrequency(915.8f);     // keypad confirmed with the value unchanged
++  panel.onHide();
++  EXPECT_EQ(0, app.setCalls);       // nothing to write -> no apply at all
++}
++
++TEST(RadioPanel, OnShowRefreshesWhenCleanAndPreservesPendingEdit) {
++  FakeRadioApp app;
++  app.cfg = {915.8f, 250.0f, 10, 5, 20, false};
++  mishmesh::RadioSettingsPanel& panel = mishmesh::radioSettings();
++  auto ctx = ctxWith(&app);
++  panel.begin(ctx);
++
++  app.cfg.freqMhz = 911.0f;         // changed externally while backgrounded
++  panel.onShow();                   // clean panel -> pick the new value up
++  EXPECT_FLOAT_EQ(911.0f, panel.stagedConfig().freqMhz);
++
++  panel.stageFrequency(910.525f);   // pending edit
++  app.cfg.freqMhz = 918.0f;         // another external change
++  panel.onShow();                   // returning from a sub-applet must not discard it
++  EXPECT_FLOAT_EQ(910.525f, panel.stagedConfig().freqMhz);
++}
++
++TEST(RadioPanel, EditingFrequencyRetiresStaleRepeatRestoreTarget) {
++  FakeRadioApp app;
++  app.cfg = {915.8f, 250.0f, 10, 5, 20, false};
++  app.savedFreq = 911.0f;           // left over from an earlier repeat session
++  mishmesh::RadioSettingsPanel& panel = mishmesh::radioSettings();
++  auto ctx = ctxWith(&app);
++  panel.begin(ctx);
++  panel.stageFrequency(910.525f);
++  panel.onHide();
++  EXPECT_FLOAT_EQ(910.525f, app.cfg.freqMhz);
++  EXPECT_FLOAT_EQ(0.0f, app.savedFreq);   // cleared, so "Off" cannot snap back to 911
++}
++
++TEST(RadioPanel, EnablingRepeatRecordsCommittedPreRepeatFrequency) {
++  FakeRadioApp app;
++  app.cfg = {910.525f, 62.5f, 7, 5, 20, false};
++  mishmesh::RadioSettingsPanel& panel = mishmesh::radioSettings();
++  auto ctx = ctxWith(&app);
++  panel.begin(ctx);
++  panel.stageFrequency(918.0f);     // what the Repeater picker's preset row stages
++  panel.stageRepeater(true);
++  panel.onHide();
++  EXPECT_TRUE(app.cfg.repeater);
++  EXPECT_FLOAT_EQ(918.0f, app.cfg.freqMhz);
++  EXPECT_FLOAT_EQ(910.525f, app.savedFreq);   // the frequency we were actually on
++}
++
++TEST(RadioPanel, DisablingRepeatClearsRestoreTarget) {
++  FakeRadioApp app;
++  app.cfg = {918.0f, 62.5f, 7, 5, 20, true};
++  app.savedFreq = 910.525f;
++  mishmesh::RadioSettingsPanel& panel = mishmesh::radioSettings();
++  auto ctx = ctxWith(&app);
++  panel.begin(ctx);
++  panel.stageFrequency(910.525f);   // ROW_OFF stages the restore, then disables
++  panel.stageRepeater(false);
++  panel.onHide();
++  EXPECT_FALSE(app.cfg.repeater);
++  EXPECT_FLOAT_EQ(910.525f, app.cfg.freqMhz);
++  EXPECT_FLOAT_EQ(0.0f, app.savedFreq);   // consumed; no stale target left behind
++}
++
+ int main(int argc, char** argv) {
+   ::testing::InitGoogleTest(&argc, argv);
+   return RUN_ALL_TESTS();
 diff --git a/test/test_mishmesh_repeaterapplet/test_repeaterapplet.cpp b/test/test_mishmesh_repeaterapplet/test_repeaterapplet.cpp
-index 30508a51..18fa16ca 100644
+index 30508a51..e2dbdd35 100644
 --- a/test/test_mishmesh_repeaterapplet/test_repeaterapplet.cpp
 +++ b/test/test_mishmesh_repeaterapplet/test_repeaterapplet.cpp
-@@ -39,14 +39,51 @@ AppletContext ctxWith(AppServices* a, RadioStagingTarget* t) {
+@@ -39,27 +39,81 @@ AppletContext ctxWith(AppServices* a, RadioStagingTarget* t) {
  }
  }  // namespace
  
@@ -202,8 +482,9 @@ index 30508a51..18fa16ca 100644
 +  EXPECT_EQ(5, a.count());              // Off + current + 3 frequencies
 +  EXPECT_STREQ("Off", a.label(RepeaterApplet::ROW_OFF));
 +  EXPECT_TRUE(a.radioOn(RepeaterApplet::ROW_OFF));   // repeat off -> Off selected
-+}
-+
+ }
+ 
+-TEST(RepeaterApplet, SelectFrequencyEnablesAndRemembers) {
 +// The "current" row names the frequency it would repeat on, so the choice is not
 +// a blind one.
 +TEST(RepeaterApplet, CurrentRowLabelShowsStagedFrequency) {
@@ -225,8 +506,25 @@ index 30508a51..18fa16ca 100644
 +  EXPECT_TRUE(a.onInput(InputEvent::Select));
 +  EXPECT_TRUE(tgt.cfg.repeater);
 +  EXPECT_FLOAT_EQ(915.8f, tgt.cfg.freqMhz);   // unchanged
-+  EXPECT_FLOAT_EQ(915.8f, app.saved);         // restore target is the same freq
++  EXPECT_FLOAT_EQ(0.0f, app.saved);           // nothing persisted here: see below
 +  EXPECT_TRUE(a.radioOn(RepeaterApplet::ROW_CURRENT));
++}
++
++// The picker only ever sees staged values, so it must not write the restore
++// frequency itself -- backing out would leave a pref behind describing a tuning
++// the radio never had. RadioSettingsPanel::onHide derives it from the committed
++// before/after state instead.
++TEST(RepeaterApplet, SelectingARowPersistsNothing) {
++  FakeApp app; FakeTgt tgt;
++  AppletContext ctx = ctxWith(&app, &tgt);
++  RepeaterApplet& a = repeaterApplet();
++  a.onStart(ctx);
++  for (int row = 0; row < a.count(); row++) {
++    app.saved = 0.0f;
++    a.selectRowForTest(row);
++    a.onInput(InputEvent::Select);
++    EXPECT_FLOAT_EQ(0.0f, app.saved) << "row " << row << " wrote to flash";
++  }
 +}
 +
 +// Exactly one row carries the mark: repeating on a preset marks the preset row,
@@ -239,10 +537,10 @@ index 30508a51..18fa16ca 100644
 +  a.onStart(ctx);
 +  EXPECT_FALSE(a.radioOn(RepeaterApplet::ROW_CURRENT));
 +  EXPECT_TRUE(a.radioOn(RepeaterApplet::ROW_PRESET0 + 2));   // 918.0
- }
- 
- TEST(RepeaterApplet, SelectFrequencyEnablesAndRemembers) {
-@@ -54,12 +91,12 @@ TEST(RepeaterApplet, SelectFrequencyEnablesAndRemembers) {
++}
++
++TEST(RepeaterApplet, SelectFrequencyEnablesAndRetunes) {
+   FakeApp app; FakeTgt tgt;             // start 915.8, repeat off
    AppletContext ctx = ctxWith(&app, &tgt);
    RepeaterApplet& a = repeaterApplet();
    a.onStart(ctx);
@@ -251,13 +549,14 @@ index 30508a51..18fa16ca 100644
    EXPECT_TRUE(a.onInput(InputEvent::Select));
    EXPECT_TRUE(tgt.cfg.repeater);
    EXPECT_FLOAT_EQ(918.0f, tgt.cfg.freqMhz);
-   EXPECT_FLOAT_EQ(915.8f, app.saved);  // pre-repeat freq remembered
+-  EXPECT_FLOAT_EQ(915.8f, app.saved);  // pre-repeat freq remembered
 -  EXPECT_TRUE(a.radioOn(3));
++  EXPECT_FLOAT_EQ(0.0f, app.saved);    // staged only; the panel records the pre-repeat freq
 +  EXPECT_TRUE(a.radioOn(RepeaterApplet::ROW_PRESET0 + 2));
  }
  
  TEST(RepeaterApplet, SelectOffRestoresSavedFreq) {
-@@ -69,11 +106,11 @@ TEST(RepeaterApplet, SelectOffRestoresSavedFreq) {
+@@ -69,11 +123,11 @@ TEST(RepeaterApplet, SelectOffRestoresSavedFreq) {
    AppletContext ctx = ctxWith(&app, &tgt);
    RepeaterApplet& a = repeaterApplet();
    a.onStart(ctx);
