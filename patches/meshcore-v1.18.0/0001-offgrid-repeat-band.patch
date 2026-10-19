@@ -1,0 +1,24 @@
+diff --git a/examples/companion_radio/MyMesh.cpp b/examples/companion_radio/MyMesh.cpp
+index f32ea67a..e067ebbf 100644
+--- a/examples/companion_radio/MyMesh.cpp
++++ b/examples/companion_radio/MyMesh.cpp
+@@ -1032,6 +1032,19 @@ struct FreqRange {
+ static FreqRange repeat_freq_ranges[] = {
+   #ifdef ALLOWED_REPEAT_FREQ_RANGE
+   ALLOWED_REPEAT_FREQ_RANGE
++  #elif defined(OFFGRID_ALLOW_US915_BAND)
++  // Whole US/Canada 902-928 MHz ISM band (FCC Part 15), rather than the single
++  // 918.000 point above. Lets a group enable off-grid/repeat mode on whatever
++  // frequency they already use, so the rest of the mesh needs no reconfiguring
++  // -- the error-prone part when a team is already deployed.
++  //
++  // Deliberately still bounded by the band: the aim is to drop a restriction
++  // that has no regulatory basis, not to make out-of-band TX easy to select.
++  //
++  // NOTE: this cannot be expressed via the ALLOWED_REPEAT_FREQ_RANGE hook
++  // above, because SCons splits -D values on commas, so a {lower,upper} pair
++  // arrives as two separate defines and silently collapses to one bogus range.
++  { 902000, 928000 }
+   #else
+   { 433000, 433000 },
+   { 869495, 869495 },

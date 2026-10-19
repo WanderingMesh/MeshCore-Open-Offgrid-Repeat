@@ -1,0 +1,44 @@
+diff --git a/examples/companion_radio/MyMesh.cpp b/examples/companion_radio/MyMesh.cpp
+index e067ebbf..e6877d19 100644
+--- a/examples/companion_radio/MyMesh.cpp
++++ b/examples/companion_radio/MyMesh.cpp
+@@ -994,6 +994,18 @@ void MyMesh::begin() {
+   _prefs.gps_enabled = constrain(_prefs.gps_enabled, 0, 1);  // Ensure boolean 0 or 1
+   _prefs.gps_interval = constrain(_prefs.gps_interval, 0, 86400);  // Max 24 hours
+ 
++#ifdef OFFGRID_ALLOW_US915_BAND
++  // Prefs saved by firmware without the CLI guard in handleCommand() (e.g. stock
++  // 1.18.0, whose `set radio` ignores the repeat table) can hold repeat-on with an
++  // out-of-range frequency. Never start forwarding there. Not written back: this
++  // re-runs every boot, and the next savePrefs() persists the corrected flag.
++  // _prefs.freq is MHz while the table is kHz, hence the round-to-nearest.
++  if (_prefs.isRepeatEn() && !isValidClientRepeatFreq((uint32_t)(_prefs.freq * 1000.0f + 0.5f))) {
++    MESH_DEBUG_PRINTLN("repeat disabled: saved freq is outside the allowed repeat range");
++    _prefs.setRepeatEn(false);
++  }
++#endif
++
+   _active_ble_pin = _prefs.ble_pin;
+ 
+   resetContacts();
+@@ -2099,6 +2111,20 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp, char*
+     command += 3;
+   }
+ 
++#ifdef OFFGRID_ALLOW_US915_BAND
++  // CommonRadioPrefs' `set radio` only range-checks 150-2500 MHz and never consults
++  // repeat_freq_ranges, so while repeat is on it would let any CLI (app, remote
++  // contact, USB) retune this node out of band from the next boot. Input outside
++  // 150-2500 MHz, or otherwise malformed, is left to that handler's own error.
++  if (_prefs.isRepeatEn() && memcmp(command, "set radio ", 10) == 0) {
++    float mhz = strtof(&command[10], nullptr);
++    if (mhz >= 150.0f && mhz <= 2500.0f && !isValidClientRepeatFreq((uint32_t)(mhz * 1000.0f + 0.5f))) {
++      strcpy(reply, "Error, repeat on: freq outside repeat range");
++      return true;
++    }
++  }
++#endif
++
+   if (_prefs.getRadioPrefs()->handleCommand(command, sender_timestamp, reply)) {  // is radio CLI command?
+     if (_prefs.getRadioPrefs()->isDirty()) { savePrefs(); }
+     return true;

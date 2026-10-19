@@ -80,6 +80,7 @@ In [`firmware/`](firmware/). Each board has a `.uf2` (bootloader drag-and-drop) 
 | Board | File prefix | Flash used |
 | --- | --- | --- |
 | RAK4631 | `RAK_4631_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598` | 494112 / 712704 (69.3%) |
+| RAK4631 (MeshCore v1.18.0) | `RAK_4631_companion_radio_ble_offgrid-v1.18.0-offgrid` | 462772 / 712704 (64.9%) |
 | RAK3401 + RAK13302 (WisMesh 1W) | `RAK_3401_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598` | 431824 / 712704 (60.6%) |
 | Wio Tracker L1 (MishMesh) | `WioTrackerL1_companion_radio_ble_offgrid_mishmesh_mm-v1.5.0-offgrid2_mc-v1.17.1-ff6b8bdc` | 666676 / 708608 (94.1%) |
 
@@ -90,11 +91,13 @@ e8829aa9c180b8c91a6775f963ad21fc1177df0cf34a380ec064caea7ae0eb1d  RAK_3401_compa
 16d8271fe70b925aa30588141928b25c3e431cac236d47b564674a1c02f8ddb5  RAK_3401_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598-e9412598.zip
 2e933c4e4933337eafcc2e79dd8d8710c35b986644a274c5757366eb5e34684b  RAK_4631_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598-e9412598.uf2
 ea58cb1f514a11d25e3bbb34227285520256932491b4a24611f248d107380fd0  RAK_4631_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598-e9412598.zip
+96535983b761e3e61b504935a37b8444f137989358627d2065bb15ee2cc85a89  RAK_4631_companion_radio_ble_offgrid-v1.18.0-offgrid-81dbae59.uf2
+cf7091b8e8f713894c439e0f1d25c73b5c578652b118848e1b9c4d0bffa8687e  RAK_4631_companion_radio_ble_offgrid-v1.18.0-offgrid-81dbae59.zip
 53621aab076983ca380ef8c61fdf5620d82b5ed9378bd8c2a11b02806ba64ab6  WioTrackerL1_companion_radio_ble_offgrid_mishmesh_mm-v1.5.0-offgrid2_mc-v1.17.1-ff6b8bdc.uf2
 89ee9b157e379d6bfa3a9f14a0f84eb6e95fdae9fd3cfe4edca4a1ce9b6fc154  WioTrackerL1_companion_radio_ble_offgrid_mishmesh_mm-v1.5.0-offgrid2_mc-v1.17.1-ff6b8bdc.zip
 ```
 
-All three are nRF52840 (UF2 family `0xADA52840`). The RAK boards start at `0x26000`
+All of these are nRF52840 (UF2 family `0xADA52840`). The RAK boards start at `0x26000`
 (SoftDevice S140 v6); the Wio Tracker L1 starts at `0x27000` (S140 v7).
 
 ### Flashing
@@ -156,6 +159,34 @@ and `env.Append(CPPDEFINES=[(name, value)])`), which is very likely why nothing 
 upstream tree actually uses the hook. Hence the range lives in the source and the build
 flag only selects it.
 
+### MeshCore v1.18.0
+
+The table, `isValidClientRepeatFreq()`, the `CMD_SET_RADIO_PARAMS` check and the
+`CMD_GET_ALLOWED_REPEAT_FREQ` responder are all unchanged in `companion-v1.18.0`, so
+[`0001`](patches/meshcore-v1.18.0/0001-offgrid-repeat-band.patch) is the same hunk at new
+line offsets.
+
+1.18.0 also adds a companion CLI. It is reachable from the official app's Command Line
+screen (MeshCore App v1.50.0+, per the release notes), from contacts you grant the Remote
+CLI permission, and from the USB serial rescue CLI. Its `set radio freq,bw,sf,cr` only
+range-checks 150-2500 MHz and **never consults the repeat table**, and nothing re-checks
+repeat at boot. So a repeating node can be retuned anywhere in 150-2500 MHz and keep
+repeating there after the next reboot. Stock 1.18.0 has the same hole around its three fixed points.
+
+[`0002`](patches/meshcore-v1.18.0/0002-guard-cli-and-boot-repeat-band.patch) closes it,
+behind the same `OFFGRID_ALLOW_US915_BAND` flag:
+
+- While repeat is on, a `set radio` outside the allowed range is refused with
+  `Error, repeat on: freq outside repeat range`. Turn repeat off first if you really mean
+  to leave the band.
+- At boot, repeat is switched off if the saved frequency is outside the allowed range.
+  That catches prefs written by firmware without the guard, such as stock 1.18.0.
+
+`CMD_SET_RADIO_PARAMS` and `set radio` are the only two paths that change the frequency
+in 1.18.0, so with both guards the band bound holds on all of them. Turning repeat *on*
+is still done through the app's radio settings, since the CLI has no repeat command, so
+the client support notes above apply unchanged.
+
 ### MishMesh additions
 
 MishMesh has an on-device UI, which needs two extra things:
@@ -216,7 +247,7 @@ device screen is awake is exposed to the original bug.
 Requires PlatformIO. Patches are verified to apply cleanly to the exact upstream commits
 below and to reproduce these binaries.
 
-### MeshCore (RAK4631, RAK3401)
+### MeshCore v1.17.1 (RAK4631, RAK3401)
 
 ```sh
 git clone https://github.com/meshcore-dev/MeshCore.git
@@ -235,6 +266,31 @@ Artifacts land in `out/`.
 
 > **`build.sh` runs `rm -rf out` on every invocation.** Copy each artifact somewhere
 > safe before building the next target, or the second build will delete the first.
+
+### MeshCore v1.18.0 (RAK4631)
+
+```sh
+git clone https://github.com/meshcore-dev/MeshCore.git
+cd MeshCore
+git checkout 81dbae592ffad40b4212bc0b37e82b38da08f4bc   # companion-v1.18.0
+
+git apply /path/to/patches/meshcore-v1.18.0/0001-offgrid-repeat-band.patch
+git apply /path/to/patches/meshcore-v1.18.0/0002-guard-cli-and-boot-repeat-band.patch
+cp /path/to/patches/meshcore-v1.18.0/platformio.local.ini .   # gitignored; adds the _offgrid env
+
+export FIRMWARE_VERSION=v1.18.0-offgrid
+sh build.sh build-firmware RAK_4631_companion_radio_ble_offgrid
+```
+
+The device reports `FIRMWARE_VERSION` plus the `HEAD` hash, i.e. `v1.18.0-offgrid-81dbae59`,
+so these units can be told apart from stock 1.18.0 in the app. Leave the patches
+uncommitted so that hash stays the public upstream commit.
+
+1.18.0 moved to GCC 14.2 (`toolchain-gccarmnoneeabi@1.140201.0`) and a newer RadioLib, so
+the first build downloads new packages and can take 15 minutes or more.
+
+The patches are board-agnostic, but only the RAK4631 has been built and checked on 1.18.0
+so far. The RAK3401 and Wio builds remain on 1.17.1.
 
 ### MishMesh (Wio Tracker L1)
 
@@ -284,6 +340,40 @@ constants.
 **UF2 header.** Check every block has valid magics (`0x0A324655`, `0x9E5D5157`,
 `0x0AB16F30`), sequential indices, family id `0xADA52840`, and the right start address
 for the board's SoftDevice.
+
+**MeshCore v1.18.0 builds** need a slightly different band-constant check:
+
+- Scan the `firmware.bin` inside each build's `.zip` after copying it out of `out/`. A
+  second `build.sh` run (for the stock env, say) can clear `.pio/build` as well as `out/`.
+- Count only 4-byte-aligned matches. GCC 14 leaves each fixed frequency in two literal
+  pools, and there is also an unrelated, unaligned `918000` byte pattern inside
+  `Adafruit_BusIO_Register::write`.
+- The `0002` guard's error string should be in the offgrid image and absent from stock,
+  which confirms the guard compiled in only behind the flag.
+
+```sh
+unzip -p RAK_4631_companion_radio_ble_offgrid-v1.18.0-offgrid-81dbae59.zip firmware.bin > fw.bin
+python3 -c "
+import struct
+d=open('fw.bin','rb').read()
+for v in (433000,869495,918000,902000,928000):
+    p=struct.pack('<I',v)
+    print(v, sum(d[i:i+4]==p for i in range(0,len(d)-3,4)))
+print('guard', d.count(b'freq outside repeat range'))"
+```
+
+In the order printed, expect counts of `0 0 0 1 1` and `guard 1` for offgrid, and
+`2 2 2 0 0` and `guard 0` for stock.
+
+**On the device (v1.18.0).** From a client with a Command Line screen:
+
+1. `ver` reports `v1.18.0-offgrid-81dbae59`.
+2. `get radio` shows the current `freq,bw,sf,cr`. Reuse its bw/sf/cr below.
+3. With repeat on, `set radio 869.525,<bw>,<sf>,<cr>` is refused with
+   `Error, repeat on: freq outside repeat range`.
+4. With repeat on, an in-band `set radio 911,<bw>,<sf>,<cr>` replies `OK - reboot to apply`,
+   and after the reboot the node is still repeating, now on 911. Set your own frequency
+   back the same way afterwards.
 
 ## Credits and license
 
