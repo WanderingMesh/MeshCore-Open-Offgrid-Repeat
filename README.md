@@ -52,7 +52,7 @@ nothing at all.
 | MeshCore Open, build 17+ (PRE-BETA-9.5.2 and later) | **Works.** Queries `CMD_GET_ALLOWED_REPEAT_FREQ` and validates against whatever the device reports. |
 | MeshCore Open, build 16 (PRE-BETA-9.5.1) | **Does not work.** Hardcodes `{433000, 869000, 918000}` and returns before sending the frame. |
 | Official MeshCore iOS/Android app | **Unverified.** The app is closed source. See below. |
-| MishMesh on-device UI (Wio Tracker L1) | **Works, no phone needed.** |
+| MishMesh on-device UI (Wio Tracker L1, MishMesh build only) | **Works, no phone needed.** |
 
 Both MeshCore Open builds report marketing version `9.5.0` in-app. The **build number in
 parentheses** is the only reliable way to tell them apart. A secondary tell is the
@@ -82,6 +82,7 @@ In [`firmware/`](firmware/). Each board has a `.uf2` (bootloader drag-and-drop) 
 | RAK4631 | `RAK_4631_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598` | 494112 / 712704 (69.3%) |
 | RAK4631 (MeshCore v1.18.0) | `RAK_4631_companion_radio_ble_offgrid-v1.18.0-offgrid` | 462772 / 712704 (64.9%) |
 | RAK3401 + RAK13302 (WisMesh 1W) | `RAK_3401_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598` | 431824 / 712704 (60.6%) |
+| Wio Tracker L1 (MeshCore v1.18.0) | `WioTrackerL1_companion_radio_ble_offgrid-v1.18.0-offgrid` | 405196 / 708608 (57.2%) |
 | Wio Tracker L1 (MishMesh) | `WioTrackerL1_companion_radio_ble_offgrid_mishmesh_mm-v1.5.0-offgrid2_mc-v1.17.1-ff6b8bdc` | 666676 / 708608 (94.1%) |
 
 SHA-256:
@@ -93,6 +94,8 @@ e8829aa9c180b8c91a6775f963ad21fc1177df0cf34a380ec064caea7ae0eb1d  RAK_3401_compa
 ea58cb1f514a11d25e3bbb34227285520256932491b4a24611f248d107380fd0  RAK_4631_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598-e9412598.zip
 96535983b761e3e61b504935a37b8444f137989358627d2065bb15ee2cc85a89  RAK_4631_companion_radio_ble_offgrid-v1.18.0-offgrid-81dbae59.uf2
 cf7091b8e8f713894c439e0f1d25c73b5c578652b118848e1b9c4d0bffa8687e  RAK_4631_companion_radio_ble_offgrid-v1.18.0-offgrid-81dbae59.zip
+14936b4a3c2b0ae2a1b93d5845d7ba5458f01f49f536bec63cf30ecfb0c7bda2  WioTrackerL1_companion_radio_ble_offgrid-v1.18.0-offgrid-81dbae59.uf2
+315a37a8742a5182f0d9915efa513c689e82140356b0e6aa165bbcb52588bb20  WioTrackerL1_companion_radio_ble_offgrid-v1.18.0-offgrid-81dbae59.zip
 53621aab076983ca380ef8c61fdf5620d82b5ed9378bd8c2a11b02806ba64ab6  WioTrackerL1_companion_radio_ble_offgrid_mishmesh_mm-v1.5.0-offgrid2_mc-v1.17.1-ff6b8bdc.uf2
 89ee9b157e379d6bfa3a9f14a0f84eb6e95fdae9fd3cfe4edca4a1ce9b6fc154  WioTrackerL1_companion_radio_ble_offgrid_mishmesh_mm-v1.5.0-offgrid2_mc-v1.17.1-ff6b8bdc.zip
 ```
@@ -113,8 +116,17 @@ Board-specific notes:
 - **RAK3401 with no display** — fine. The stock companion UI is status-only anyway; it
   has no repeat toggle and no settings editor, so off-grid repeat on this board is
   driven entirely by the phone app.
-- **Wio Tracker L1** — MishMesh's on-device Repeater menu gains an `On <freq>` row.
+- **Wio Tracker L1, MishMesh build** — MishMesh's on-device Repeater menu gains an `On <freq>` row.
   If you don't see that row, the offgrid firmware is not actually flashed.
+- **Wio Tracker L1, MeshCore v1.18.0 build** — stock MeshCore, not MishMesh. Its on-device
+  UI has no repeat or radio-settings control, so off-grid repeat is turned on from the
+  phone app, as on the RAK boards. It is for the standard (OLED) L1; the 1W and E-ink models have their own
+  upstream envs.
+- **Moving a Wio from the MishMesh build to the v1.18.0 build** — both keep settings in
+  `/prefs.json`, and stock 1.18.0 skips MishMesh's extra `mm` section. So the node name,
+  radio settings and repeat flag should carry over, and only MishMesh-only settings are
+  dropped. That comes from reading both loaders, not from a device test, so check the
+  radio settings in the app after flashing.
 
 ## What changed
 
@@ -267,7 +279,7 @@ Artifacts land in `out/`.
 > **`build.sh` runs `rm -rf out` on every invocation.** Copy each artifact somewhere
 > safe before building the next target, or the second build will delete the first.
 
-### MeshCore v1.18.0 (RAK4631)
+### MeshCore v1.18.0 (RAK4631, Wio Tracker L1)
 
 ```sh
 git clone https://github.com/meshcore-dev/MeshCore.git
@@ -276,10 +288,12 @@ git checkout 81dbae592ffad40b4212bc0b37e82b38da08f4bc   # companion-v1.18.0
 
 git apply /path/to/patches/meshcore-v1.18.0/0001-offgrid-repeat-band.patch
 git apply /path/to/patches/meshcore-v1.18.0/0002-guard-cli-and-boot-repeat-band.patch
-cp /path/to/patches/meshcore-v1.18.0/platformio.local.ini .   # gitignored; adds the _offgrid env
+cp /path/to/patches/meshcore-v1.18.0/platformio.local.ini .   # gitignored; adds the _offgrid envs
 
 export FIRMWARE_VERSION=v1.18.0-offgrid
 sh build.sh build-firmware RAK_4631_companion_radio_ble_offgrid
+# copy out/ somewhere safe before the next build: build.sh wipes it every run
+sh build.sh build-firmware WioTrackerL1_companion_radio_ble_offgrid
 ```
 
 The device reports `FIRMWARE_VERSION` plus the `HEAD` hash, i.e. `v1.18.0-offgrid-81dbae59`,
@@ -289,8 +303,8 @@ uncommitted so that hash stays the public upstream commit.
 1.18.0 moved to GCC 14.2 (`toolchain-gccarmnoneeabi@1.140201.0`) and a newer RadioLib, so
 the first build downloads new packages and can take 15 minutes or more.
 
-The patches are board-agnostic, but only the RAK4631 has been built and checked on 1.18.0
-so far. The RAK3401 and Wio builds remain on 1.17.1.
+The patches are board-agnostic. On 1.18.0, the RAK4631 and the standard Wio Tracker L1
+have been built and checked. The RAK3401 build and the MishMesh Wio build remain on 1.17.1.
 
 ### MishMesh (Wio Tracker L1)
 
@@ -363,7 +377,9 @@ print('guard', d.count(b'freq outside repeat range'))"
 ```
 
 In the order printed, expect counts of `0 0 0 1 1` and `guard 1` for offgrid, and
-`2 2 2 0 0` and `guard 0` for stock.
+`2 2 2 0 0` and `guard 0` for stock. The official release asset for the same env (for
+example `WioTrackerL1_companion_radio_ble-v1.18.0-81dbae5.zip`) works as the stock
+reference and gives the same stock counts, so you don't need to build stock yourself.
 
 **On the device (v1.18.0).** From a client with a Command Line screen:
 
