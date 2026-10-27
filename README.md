@@ -82,6 +82,7 @@ In [`firmware/`](firmware/). Each board has a `.uf2` (bootloader drag-and-drop) 
 | RAK4631 | `RAK_4631_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598` | 494112 / 712704 (69.3%) |
 | RAK4631 (MeshCore v1.18.0) | `RAK_4631_companion_radio_ble_offgrid-v1.18.0-offgrid` | 462772 / 712704 (64.9%) |
 | RAK3401 + RAK13302 (WisMesh 1W) | `RAK_3401_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598` | 431824 / 712704 (60.6%) |
+| RAK3401 + RAK13302 (WisMesh 1W, MeshCore v1.18.0) | `RAK_3401_companion_radio_ble_offgrid-v1.18.0-offgrid` | 431644 / 712704 (60.6%) |
 | Wio Tracker L1 (MeshCore v1.18.0) | `WioTrackerL1_companion_radio_ble_offgrid-v1.18.0-offgrid` | 405196 / 708608 (57.2%) |
 | Wio Tracker L1 (MishMesh) | `WioTrackerL1_companion_radio_ble_offgrid_mishmesh_mm-v1.5.0-offgrid2_mc-v1.17.1-ff6b8bdc` | 666676 / 708608 (94.1%) |
 
@@ -90,6 +91,8 @@ SHA-256:
 ```
 e8829aa9c180b8c91a6775f963ad21fc1177df0cf34a380ec064caea7ae0eb1d  RAK_3401_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598-e9412598.uf2
 16d8271fe70b925aa30588141928b25c3e431cac236d47b564674a1c02f8ddb5  RAK_3401_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598-e9412598.zip
+8f1996dfe834b719d22c3194ee6d411a471bd10aa1e872a034bc5f5016d17444  RAK_3401_companion_radio_ble_offgrid-v1.18.0-offgrid-81dbae59.uf2
+4c43d37bef8d51d51d3199029a1bc3fcddc3d29db0c4284ac8f7dcfc77faa4f3  RAK_3401_companion_radio_ble_offgrid-v1.18.0-offgrid-81dbae59.zip
 2e933c4e4933337eafcc2e79dd8d8710c35b986644a274c5757366eb5e34684b  RAK_4631_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598-e9412598.uf2
 ea58cb1f514a11d25e3bbb34227285520256932491b4a24611f248d107380fd0  RAK_4631_companion_radio_ble_offgrid-companion-v1.17.1-4-ge9412598-e9412598.zip
 96535983b761e3e61b504935a37b8444f137989358627d2065bb15ee2cc85a89  RAK_4631_companion_radio_ble_offgrid-v1.18.0-offgrid-81dbae59.uf2
@@ -113,15 +116,19 @@ Board-specific notes:
 - **RAK3401 + RAK13302** — the 1W front end (SKY66122-11 FEM) is driven by the stock
   `variants/rak3401` config. These builds inherit `SX126X_REGISTER_PATCH=1` and
   `LORA_TX_POWER=22` from upstream unchanged.
-- **RAK3401 with no display** — fine. The stock companion UI is status-only anyway; it
-  has no repeat toggle and no settings editor, so off-grid repeat on this board is
-  driven entirely by the phone app.
+- **RAK3401 with no display** — fine. The stock companion UI has no repeat toggle and no
+  settings editor anyway, so off-grid repeat on this board is driven entirely by the
+  phone app.
+- **RAK boards, v1.17.1 to v1.18.0** — two upstream changes come with the 1.18.0 builds,
+  and stock 1.18.0 has them too. The boards no longer refuse to boot when the battery is
+  below 3.3 V, and on the RAK3401 the GPS serial pins are swapped to fix RAK12500/12501
+  GPS modules.
 - **Wio Tracker L1, MishMesh build** — MishMesh's on-device Repeater menu gains an `On <freq>` row.
   If you don't see that row, the offgrid firmware is not actually flashed.
 - **Wio Tracker L1, MeshCore v1.18.0 build** — stock MeshCore, not MishMesh. Its on-device
   UI has no repeat or radio-settings control, so off-grid repeat is turned on from the
-  phone app, as on the RAK boards. It is for the standard (OLED) L1; the 1W and E-ink models have their own
-  upstream envs.
+  phone app, as on the RAK boards. It is for the standard (OLED) L1; the 1W and E-ink
+  models have their own upstream envs.
 - **Moving a Wio from the MishMesh build to the v1.18.0 build** — both keep settings in
   `/prefs.json`, and stock 1.18.0 skips MishMesh's extra `mm` section. So the node name,
   radio settings and repeat flag should carry over, and only MishMesh-only settings are
@@ -279,7 +286,7 @@ Artifacts land in `out/`.
 > **`build.sh` runs `rm -rf out` on every invocation.** Copy each artifact somewhere
 > safe before building the next target, or the second build will delete the first.
 
-### MeshCore v1.18.0 (RAK4631, Wio Tracker L1)
+### MeshCore v1.18.0 (RAK4631, RAK3401, Wio Tracker L1)
 
 ```sh
 git clone https://github.com/meshcore-dev/MeshCore.git
@@ -291,8 +298,9 @@ git apply /path/to/patches/meshcore-v1.18.0/0002-guard-cli-and-boot-repeat-band.
 cp /path/to/patches/meshcore-v1.18.0/platformio.local.ini .   # gitignored; adds the _offgrid envs
 
 export FIRMWARE_VERSION=v1.18.0-offgrid
+# build.sh wipes out/ on every run, so copy each build's files out before the next one
 sh build.sh build-firmware RAK_4631_companion_radio_ble_offgrid
-# copy out/ somewhere safe before the next build: build.sh wipes it every run
+sh build.sh build-firmware RAK_3401_companion_radio_ble_offgrid
 sh build.sh build-firmware WioTrackerL1_companion_radio_ble_offgrid
 ```
 
@@ -303,8 +311,8 @@ uncommitted so that hash stays the public upstream commit.
 1.18.0 moved to GCC 14.2 (`toolchain-gccarmnoneeabi@1.140201.0`) and a newer RadioLib, so
 the first build downloads new packages and can take 15 minutes or more.
 
-The patches are board-agnostic. On 1.18.0, the RAK4631 and the standard Wio Tracker L1
-have been built and checked. The RAK3401 build and the MishMesh Wio build remain on 1.17.1.
+The patches are board-agnostic. On 1.18.0, the RAK4631, the RAK3401 and the standard Wio
+Tracker L1 have been built and checked. The MishMesh Wio build remains on 1.17.1.
 
 ### MishMesh (Wio Tracker L1)
 
